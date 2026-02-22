@@ -16,6 +16,7 @@ static char ph_wifi_pass[64]    = "";
 static char ph_pihole_host[64]  = "";  // Pi-hole IP or hostname
 static char ph_pihole_pass[64]  = "";  // Pi-hole admin password (empty = passwordless)
 static bool ph_has_settings     = false;  // true if SSID + Pi-hole host are saved
+static bool ph_force_portal     = false;  // set by long-press to force setup on next boot
 
 // ---------------------------------------------------------------------------
 // Portal state
@@ -34,13 +35,23 @@ static void phLoadSettings() {
   String pass   = prefs.getString("pass",   "");
   String pihost = prefs.getString("pihost", "");
   String pipass = prefs.getString("pipass", "");
+  bool   force  = prefs.getBool("forceportal", false);
   prefs.end();
 
-  ssid.toCharArray(ph_wifi_ssid,   sizeof(ph_wifi_ssid));
-  pass.toCharArray(ph_wifi_pass,   sizeof(ph_wifi_pass));
+  // Clear the flag immediately so a crash won't loop us in setup
+  if (force) {
+    Preferences rw;
+    rw.begin("cydpihole", false);
+    rw.putBool("forceportal", false);
+    rw.end();
+  }
+
+  ssid.toCharArray(ph_wifi_ssid,    sizeof(ph_wifi_ssid));
+  pass.toCharArray(ph_wifi_pass,    sizeof(ph_wifi_pass));
   pihost.toCharArray(ph_pihole_host, sizeof(ph_pihole_host));
   pipass.toCharArray(ph_pihole_pass, sizeof(ph_pihole_pass));
   ph_has_settings = (ssid.length() > 0 && pihost.length() > 0);
+  ph_force_portal = force;
 }
 
 static void phSaveSettings(const char *ssid, const char *pass,

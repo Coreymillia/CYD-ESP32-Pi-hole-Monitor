@@ -31,6 +31,22 @@ Arduino_GFX *gfx = new Arduino_ILI9341(bus, GFX_NOT_DEFINED /* RST */, 1 /* rota
 #include "PiHole.h"
 
 // ---------------------------------------------------------------------------
+// Display modes
+// ---------------------------------------------------------------------------
+#define MODE_LIVE_FEED   0
+#define MODE_STATS       1
+#define MODE_TOP_BLOCKED 2
+#define NUM_MODES        3
+
+static int currentMode = MODE_LIVE_FEED;
+
+static const char *modeTitle[] = {
+  "Pi-Hole Monitor",
+  "Pi-Hole Stats",
+  "Top Blocked"
+};
+
+// ---------------------------------------------------------------------------
 // Layout constants (textSize 1 = 6x8px per character)
 // ---------------------------------------------------------------------------
 #define COL_STATUS_X   2    // "OK " or "BLK" — 3 chars = 18px
@@ -73,21 +89,25 @@ void drawChrome() {
   gfx->setTextColor(0x07FF);  // cyan
   gfx->setTextSize(1);
   gfx->setCursor(4, 3);
-  gfx->print("Pi-Hole Monitor");
+  gfx->print(modeTitle[currentMode]);
   gfx->setTextColor(COLOR_DIM);
   gfx->setCursor(104, 3);
   gfx->print(ph_pihole_host);
 
-  // Column labels
+  // Column labels (vary by mode)
   gfx->fillRect(0, COLHDR_Y, gfx->width(), COLHDR_H, RGB565_BLACK);
   gfx->setTextColor(COLOR_DIM);
   gfx->setTextSize(1);
-  gfx->setCursor(COL_STATUS_X, COLHDR_Y + 1);
-  gfx->print("ST");
-  gfx->setCursor(COL_CLIENT_X, COLHDR_Y + 1);
-  gfx->print(".CLT");
-  gfx->setCursor(COL_DOMAIN_X, COLHDR_Y + 1);
-  gfx->print("DOMAIN");
+  if (currentMode == MODE_LIVE_FEED) {
+    gfx->setCursor(COL_STATUS_X, COLHDR_Y + 1); gfx->print("ST");
+    gfx->setCursor(COL_CLIENT_X, COLHDR_Y + 1); gfx->print(".CLT");
+    gfx->setCursor(COL_DOMAIN_X, COLHDR_Y + 1); gfx->print("DOMAIN");
+  } else if (currentMode == MODE_TOP_BLOCKED) {
+    gfx->setCursor(2,  COLHDR_Y + 1); gfx->print("#");
+    gfx->setCursor(16, COLHDR_Y + 1); gfx->print("COUNT");
+    gfx->setCursor(56, COLHDR_Y + 1); gfx->print("DOMAIN");
+  }
+  // MODE_STATS: no column headers
 
   // Divider line
   gfx->drawFastHLine(0, DIVIDER_Y, gfx->width(), COLOR_DIM);
@@ -109,7 +129,25 @@ void truncate(const char *src, char *dst, int maxChars) {
 }
 
 // ---------------------------------------------------------------------------
-// Render all query rows
+// Number formatters
+// ---------------------------------------------------------------------------
+// Formats a large integer with comma separators, e.g. 1847203 -> "1,847,203"
+static void formatNum(long n, char *buf, size_t bufLen) {
+  if (n < 0)       { snprintf(buf, bufLen, "--");                                          return; }
+  if (n < 1000)    { snprintf(buf, bufLen, "%ld", n);                                      return; }
+  if (n < 1000000) { snprintf(buf, bufLen, "%ld,%03ld", n / 1000, n % 1000);              return; }
+  snprintf(buf, bufLen, "%ld,%03ld,%03ld", n / 1000000, (n % 1000000) / 1000, n % 1000);
+}
+
+// Formats a block count compactly, e.g. 99999 -> "99999", 150000 -> "150K"
+static void formatCount(long n, char *buf, size_t bufLen) {
+  if (n < 100000)   { snprintf(buf, bufLen, "%ld",  n);              return; }
+  if (n < 10000000) { snprintf(buf, bufLen, "%ldK", n / 1000);       return; }
+  snprintf(buf, bufLen, "%.1fM", n / 1000000.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Render all query rows (Mode 0)
 // ---------------------------------------------------------------------------
 void drawQueries() {
   // Domain column width in chars: (320 - COL_DOMAIN_X) / 6px = ~43 chars
@@ -150,21 +188,122 @@ void drawQueries() {
 }
 
 // ---------------------------------------------------------------------------
-// Fetch + redraw with status indication
+// Render stats dashboard (Mode 1)
 // ---------------------------------------------------------------------------
-void refreshQueries() {
-  // Flash the header to show an update is in progress
+void drawStats() {
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+  if (!ph_stats.valid) return;
+
+  char buf[16];
+
+  // --- Row 1: Queries Today | Blocked Today ---
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_DIM);
+  gfx->setCursor(2,   ROWS_Y + 4);  gfx->print("QUERIES TODAY");
+  gfx->setCursor(164, ROWS_Y + 4);  gfx->print("BLOCKED TODAY");
+
+  gfx->setTextSize(2);
+  formatNum(ph_stats.queries_today, buf, sizeof(buf));
+  gfx->setTextColor(COLOR_TEXT);
+  gfx->setCursor(2, ROWS_Y + 14);   gfx->print(buf);
+
+  formatNum(ph_stats.blocked_today, buf, sizeof(buf));
+  gfx->setTextColor(COLOR_BLOCKED);
+  gfx->setCursor(164, ROWS_Y + 14); gfx->print(buf);
+
+  // --- Divider ---
+  gfx->drawFastHLine(0, ROWS_Y + 38, gfx->width(), COLOR_DIM);
+
+  // --- Percent blocked (centered, yellow) ---
+  snprintf(buf, sizeof(buf), "%.1f%% BLOCKED", ph_stats.percent_blocked);
+  int pctW = strlen(buf) * 12;  // textSize 2 = 12px wide per char
+  gfx->setTextSize(2);
+  gfx->setTextColor(0xFFE0);  // yellow
+  gfx->setCursor((gfx->width() - pctW) / 2, ROWS_Y + 46);
+  gfx->print(buf);
+
+  // --- Divider ---
+  gfx->drawFastHLine(0, ROWS_Y + 70, gfx->width(), COLOR_DIM);
+
+  // --- Row 2: Blocklist Domains | Active Clients ---
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_DIM);
+  gfx->setCursor(2,   ROWS_Y + 78); gfx->print("BLOCKLIST DOMAINS");
+  gfx->setCursor(210, ROWS_Y + 78); gfx->print("CLIENTS");
+
+  gfx->setTextSize(2);
+  formatNum(ph_stats.domains_on_blocklist, buf, sizeof(buf));
+  gfx->setTextColor(COLOR_TEXT);
+  gfx->setCursor(2,   ROWS_Y + 88); gfx->print(buf);
+
+  formatNum(ph_stats.active_clients, buf, sizeof(buf));
+  gfx->setTextColor(0x07FF);  // cyan
+  gfx->setCursor(210, ROWS_Y + 88); gfx->print(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Render top blocked domains (Mode 2)
+// ---------------------------------------------------------------------------
+void drawTopBlocked() {
+  const int domainChars = (gfx->width() - 56) / 6;  // ~44 chars
+
+  for (int i = 0; i < MAX_TOP_BLOCKED; i++) {
+    int y = ROWS_Y + i * ROW_H;
+    gfx->fillRect(0, y, gfx->width(), ROW_H, RGB565_BLACK);
+
+    if (i >= ph_top_blocked_count || !ph_top_blocked[i].valid) continue;
+
+    PiBlockEntry &e = ph_top_blocked[i];
+
+    // Rank
+    char rankBuf[4];
+    snprintf(rankBuf, sizeof(rankBuf), "%d", i + 1);
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(2, y + 7);
+    gfx->print(rankBuf);
+
+    // Count
+    char countBuf[10];
+    formatCount(e.count, countBuf, sizeof(countBuf));
+    gfx->setTextColor(COLOR_BLOCKED);
+    gfx->setCursor(16, y + 7);
+    gfx->print(countBuf);
+
+    // Domain
+    char domBuf[48];
+    truncate(e.domain, domBuf, domainChars);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(56, y + 7);
+    gfx->print(domBuf);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fetch + redraw for the current mode
+// ---------------------------------------------------------------------------
+void refreshDisplay() {
+  // Brief flash to show an update is in progress
   gfx->fillRect(0, HEADER_Y, gfx->width(), HEADER_H, 0x0010);
   gfx->setTextColor(COLOR_DIM);
   gfx->setTextSize(1);
   gfx->setCursor(4, 3);
   gfx->print("Refreshing...");
 
-  if (phFetch()) {
-    drawChrome();
-    drawQueries();
+  bool ok = false;
+  if (currentMode == MODE_LIVE_FEED)   ok = phFetch();
+  if (currentMode == MODE_STATS)       ok = phFetchStats();
+  if (currentMode == MODE_TOP_BLOCKED) ok = phFetchTopBlocked();
+
+  drawChrome();
+
+  if (ok) {
+    if (currentMode == MODE_LIVE_FEED)   drawQueries();
+    if (currentMode == MODE_STATS)       drawStats();
+    if (currentMode == MODE_TOP_BLOCKED) drawTopBlocked();
   } else {
-    drawChrome();
+    // Clear the full data area so stale content from a previous mode doesn't show through
+    gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
     char errMsg[48];
     snprintf(errMsg, sizeof(errMsg), "Fetch failed: %s", ph_last_error);
     gfx->setTextColor(COLOR_BLOCKED);
@@ -172,6 +311,32 @@ void refreshQueries() {
     gfx->setCursor(4, ROWS_Y + 7);
     gfx->print(errMsg);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Button handler — short press cycles mode, 3-second hold restarts into setup
+// ---------------------------------------------------------------------------
+void checkButton() {
+  if (digitalRead(0) != LOW) return;
+
+  unsigned long pressStart = millis();
+  while (digitalRead(0) == LOW) {
+    if (millis() - pressStart >= 3000) {
+      // Long press — set NVS flag and restart into portal
+      showStatus("Restarting setup...");
+      Preferences prefs;
+      prefs.begin("cydpihole", false);
+      prefs.putBool("forceportal", true);
+      prefs.end();
+      delay(1000);
+      ESP.restart();
+    }
+    delay(20);
+  }
+
+  // Short press — advance to next mode and refresh immediately
+  currentMode = (currentMode + 1) % NUM_MODES;
+  refreshDisplay();
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +362,7 @@ void setup() {
   // Load saved WiFi settings from flash
   phLoadSettings();
 
-  bool showPortal = !ph_has_settings;  // always open portal on first boot
+  bool showPortal = !ph_has_settings || ph_force_portal;
 
   if (!showPortal) {
     // Settings exist — give a 3-second window to hold BOOT button to re-enter setup
@@ -242,7 +407,7 @@ void setup() {
   delay(400);
 
   drawChrome();
-  refreshQueries();
+  refreshDisplay();
 }
 
 // ---------------------------------------------------------------------------
@@ -252,9 +417,10 @@ void setup() {
 unsigned long lastRefresh = 0;
 
 void loop() {
+  checkButton();
   if (lastRefresh == 0 || (millis() - lastRefresh) >= REFRESH_INTERVAL) {
-    refreshQueries();
+    refreshDisplay();
     lastRefresh = millis();
   }
-  delay(500);
+  delay(20);
 }

@@ -36,14 +36,19 @@ Arduino_GFX *gfx = new Arduino_ILI9341(bus, GFX_NOT_DEFINED /* RST */, 1 /* rota
 #define MODE_LIVE_FEED   0
 #define MODE_STATS       1
 #define MODE_TOP_BLOCKED 2
-#define NUM_MODES        3
+#define MODE_TOP_CLIENTS 3
+#define MODE_ACTIVITY    4
+#define NUM_MODES        5
 
-static int currentMode = MODE_LIVE_FEED;
+static int  currentMode          = MODE_LIVE_FEED;
+static bool modeHasData[NUM_MODES] = {false};
 
 static const char *modeTitle[] = {
   "Pi-Hole Monitor",
   "Pi-Hole Stats",
-  "Top Blocked"
+  "Top Blocked",
+  "Top Clients",
+  "24h Activity"
 };
 
 // ---------------------------------------------------------------------------
@@ -102,12 +107,13 @@ void drawChrome() {
     gfx->setCursor(COL_STATUS_X, COLHDR_Y + 1); gfx->print("ST");
     gfx->setCursor(COL_CLIENT_X, COLHDR_Y + 1); gfx->print(".CLT");
     gfx->setCursor(COL_DOMAIN_X, COLHDR_Y + 1); gfx->print("DOMAIN");
-  } else if (currentMode == MODE_TOP_BLOCKED) {
+  } else if (currentMode == MODE_TOP_BLOCKED || currentMode == MODE_TOP_CLIENTS) {
     gfx->setCursor(2,  COLHDR_Y + 1); gfx->print("#");
     gfx->setCursor(16, COLHDR_Y + 1); gfx->print("COUNT");
-    gfx->setCursor(56, COLHDR_Y + 1); gfx->print("DOMAIN");
+    gfx->setCursor(56, COLHDR_Y + 1);
+    gfx->print(currentMode == MODE_TOP_CLIENTS ? "CLIENT" : "DOMAIN");
   }
-  // MODE_STATS: no column headers
+  // MODE_STATS, MODE_ACTIVITY: no column headers
 
   // Divider line
   gfx->drawFastHLine(0, DIVIDER_Y, gfx->width(), COLOR_DIM);
@@ -280,10 +286,91 @@ void drawTopBlocked() {
 }
 
 // ---------------------------------------------------------------------------
+// Render top clients (Mode 3)
+// ---------------------------------------------------------------------------
+void drawTopClients() {
+  const int nameChars = (gfx->width() - 56) / 6;
+
+  for (int i = 0; i < MAX_TOP_CLIENTS; i++) {
+    int y = ROWS_Y + i * ROW_H;
+    gfx->fillRect(0, y, gfx->width(), ROW_H, RGB565_BLACK);
+
+    if (i >= ph_top_clients_count || !ph_top_clients[i].valid) continue;
+
+    PiClientEntry &e = ph_top_clients[i];
+
+    char rankBuf[4];
+    snprintf(rankBuf, sizeof(rankBuf), "%d", i + 1);
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(2, y + 7);
+    gfx->print(rankBuf);
+
+    char countBuf[10];
+    formatCount(e.count, countBuf, sizeof(countBuf));
+    gfx->setTextColor(0x07FF);  // cyan
+    gfx->setCursor(16, y + 7);
+    gfx->print(countBuf);
+
+    char nameBuf[52];
+    truncate(e.name, nameBuf, nameChars);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(56, y + 7);
+    gfx->print(nameBuf);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render 24h activity graph (Mode 4)
+// Stacked bars: green = allowed, red = blocked; oldest left, newest right
+// ---------------------------------------------------------------------------
+void drawActivityGraph() {
+  const int graphBottom = gfx->height() - 14;
+  const int maxBarH     = graphBottom - ROWS_Y - 2;
+
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+  if (ph_history_count == 0) return;
+
+  int maxTotal = 1;
+  for (int i = 0; i < ph_history_count; i++)
+    if (ph_history[i].total > maxTotal) maxTotal = ph_history[i].total;
+
+  // 2px-wide bars, no gap; centre in display width
+  const int barW    = 2;
+  const int leftPad = (gfx->width() - ph_history_count * barW) / 2;
+
+  for (int i = 0; i < ph_history_count; i++) {
+    int x      = leftPad + i * barW;
+    int totalH = (ph_history[i].total   * maxBarH) / maxTotal;
+    int blockH = (ph_history[i].blocked * maxBarH) / maxTotal;
+    int allowH = totalH - blockH;
+
+    if (allowH > 0)
+      gfx->fillRect(x, graphBottom - totalH,  barW, allowH, COLOR_ALLOWED);
+    if (blockH > 0)
+      gfx->fillRect(x, graphBottom - blockH,  barW, blockH, COLOR_BLOCKED);
+  }
+
+  // Labels
+  gfx->setTextColor(COLOR_DIM);
+  gfx->setTextSize(1);
+  gfx->setCursor(leftPad, graphBottom + 3);
+  gfx->print("24H AGO");
+  int nowX = leftPad + ph_history_count * barW - 18;
+  gfx->setCursor(max(nowX, 0), graphBottom + 3);
+  gfx->print("NOW");
+
+  gfx->setTextColor(COLOR_ALLOWED);
+  gfx->setCursor(130, graphBottom + 3); gfx->print("OK");
+  gfx->setTextColor(COLOR_BLOCKED);
+  gfx->setCursor(154, graphBottom + 3); gfx->print("BLK");
+}
+
+// ---------------------------------------------------------------------------
 // Fetch + redraw for the current mode
+// On transient fetch failure: keep stale data visible, flash error in header
 // ---------------------------------------------------------------------------
 void refreshDisplay() {
-  // Brief flash to show an update is in progress
   gfx->fillRect(0, HEADER_Y, gfx->width(), HEADER_H, 0x0010);
   gfx->setTextColor(COLOR_DIM);
   gfx->setTextSize(1);
@@ -294,17 +381,31 @@ void refreshDisplay() {
   if (currentMode == MODE_LIVE_FEED)   ok = phFetch();
   if (currentMode == MODE_STATS)       ok = phFetchStats();
   if (currentMode == MODE_TOP_BLOCKED) ok = phFetchTopBlocked();
-
-  drawChrome();
+  if (currentMode == MODE_TOP_CLIENTS) ok = phFetchTopClients();
+  if (currentMode == MODE_ACTIVITY)    ok = phFetchHistory();
 
   if (ok) {
+    modeHasData[currentMode] = true;
+    drawChrome();
     if (currentMode == MODE_LIVE_FEED)   drawQueries();
     if (currentMode == MODE_STATS)       drawStats();
     if (currentMode == MODE_TOP_BLOCKED) drawTopBlocked();
+    if (currentMode == MODE_TOP_CLIENTS) drawTopClients();
+    if (currentMode == MODE_ACTIVITY)    drawActivityGraph();
+  } else if (modeHasData[currentMode]) {
+    // Stale data is already on screen — just flash the error in the header
+    gfx->fillRect(0, HEADER_Y, gfx->width(), HEADER_H, 0x3000);  // dark red
+    char errMsg[52];
+    snprintf(errMsg, sizeof(errMsg), "ERR: %s", ph_last_error);
+    gfx->setTextColor(COLOR_BLOCKED);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, 3);
+    gfx->print(errMsg);
   } else {
-    // Clear the full data area so stale content from a previous mode doesn't show through
+    // No prior data — show error over blank screen
+    drawChrome();
     gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
-    char errMsg[48];
+    char errMsg[52];
     snprintf(errMsg, sizeof(errMsg), "Fetch failed: %s", ph_last_error);
     gfx->setTextColor(COLOR_BLOCKED);
     gfx->setTextSize(1);
@@ -422,5 +523,14 @@ void loop() {
     refreshDisplay();
     lastRefresh = millis();
   }
+
+  // Countdown bar: 1px at y=239, drains left→right over REFRESH_INTERVAL
+  unsigned long elapsed = millis() - lastRefresh;
+  int barW = (elapsed >= REFRESH_INTERVAL)
+             ? 0
+             : (int)((REFRESH_INTERVAL - elapsed) * (long)gfx->width() / REFRESH_INTERVAL);
+  gfx->drawFastHLine(0,    gfx->height() - 1, barW,                RGB565_BLUE);
+  gfx->drawFastHLine(barW, gfx->height() - 1, gfx->width() - barW, RGB565_BLACK);
+
   delay(20);
 }

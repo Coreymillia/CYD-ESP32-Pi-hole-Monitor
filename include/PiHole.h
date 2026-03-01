@@ -316,6 +316,119 @@ static bool phFetchTopBlocked() {
 }
 
 // ---------------------------------------------------------------------------
+// Top clients (Mode 3) — /api/stats/top_clients
+// ---------------------------------------------------------------------------
+#define MAX_TOP_CLIENTS 10
+
+struct PiClientEntry {
+  char name[48];
+  long count;
+  bool valid;
+};
+
+static PiClientEntry ph_top_clients[MAX_TOP_CLIENTS];
+static int           ph_top_clients_count = 0;
+
+static bool phFetchTopClients() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ph_pihole_host[0] == '\0') {
+    snprintf(ph_last_error, sizeof(ph_last_error), "No Pi-hole host set");
+    return false;
+  }
+
+  char path[64];
+  snprintf(path, sizeof(path), "/api/stats/top_clients?count=%d", MAX_TOP_CLIENTS);
+
+  String payload;
+  int code = phGet(path, payload);
+  if (code != HTTP_CODE_OK) {
+    if (code == -1) snprintf(ph_last_error, sizeof(ph_last_error), "begin() failed");
+    else            snprintf(ph_last_error, sizeof(ph_last_error), "HTTP %d", code);
+    return false;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) {
+    snprintf(ph_last_error, sizeof(ph_last_error), "TopClt JSON error");
+    return false;
+  }
+
+  JsonArray clients = doc["clients"].as<JsonArray>();
+  if (clients.isNull()) {
+    snprintf(ph_last_error, sizeof(ph_last_error), "No clients in response");
+    return false;
+  }
+
+  ph_top_clients_count = 0;
+  for (JsonObject row : clients) {
+    if (ph_top_clients_count >= MAX_TOP_CLIENTS) break;
+    PiClientEntry &e = ph_top_clients[ph_top_clients_count++];
+    const char *name = row["name"] | "";
+    const char *ip   = row["ip"]   | "";
+    const char *display = (name[0] != '\0') ? name : ip;
+    strncpy(e.name, display, sizeof(e.name) - 1);
+    e.name[sizeof(e.name) - 1] = '\0';
+    e.count = row["count"] | 0L;
+    e.valid = true;
+  }
+
+  Serial.printf("[PiHole] Top clients: %d entries\n", ph_top_clients_count);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Activity history (Mode 4) — /api/history, 10-min buckets over 24h (144 pts)
+// ---------------------------------------------------------------------------
+#define MAX_HISTORY 144
+
+struct PiHistoryPoint {
+  int total;
+  int blocked;
+};
+
+static PiHistoryPoint ph_history[MAX_HISTORY];
+static int            ph_history_count = 0;
+
+static bool phFetchHistory() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (ph_pihole_host[0] == '\0') {
+    snprintf(ph_last_error, sizeof(ph_last_error), "No Pi-hole host set");
+    return false;
+  }
+
+  String payload;
+  int code = phGet("/api/history", payload);
+  if (code != HTTP_CODE_OK) {
+    if (code == -1) snprintf(ph_last_error, sizeof(ph_last_error), "begin() failed");
+    else            snprintf(ph_last_error, sizeof(ph_last_error), "HTTP %d", code);
+    return false;
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) {
+    snprintf(ph_last_error, sizeof(ph_last_error), "History JSON error");
+    return false;
+  }
+
+  JsonArray hist = doc["history"].as<JsonArray>();
+  if (hist.isNull()) {
+    snprintf(ph_last_error, sizeof(ph_last_error), "No history in response");
+    return false;
+  }
+
+  ph_history_count = 0;
+  for (JsonObject pt : hist) {
+    if (ph_history_count >= MAX_HISTORY) break;
+    ph_history[ph_history_count].total   = pt["total"]   | 0;
+    ph_history[ph_history_count].blocked = pt["blocked"] | 0;
+    ph_history_count++;
+  }
+
+  Serial.printf("[PiHole] History: %d points\n", ph_history_count);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Returns just the last octet of an IP string ("192.168.0.5" -> "5")
 // ---------------------------------------------------------------------------
 static void phLastOctet(const char *ip, char *buf, size_t bufLen) {

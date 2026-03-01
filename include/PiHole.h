@@ -130,37 +130,54 @@ static void phBuildUrl(char *url, size_t urlLen, const char *path) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic authenticated GET — handles auth on first call and 401 retry
+// Generic authenticated GET — handles auth on first call and 401 retry.
+// Retries once after 600 ms on begin() failure (transient socket exhaustion).
 // Returns HTTP status code, populates out on 200. Returns -1 on begin() fail.
 // ---------------------------------------------------------------------------
 static int phGet(const char *path, String &out) {
   if (!ph_auth_done && !phAuthenticate()) return -1;
 
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(8000);
-
   char url[200];
   phBuildUrl(url, sizeof(url), path);
-  if (!http.begin(client, url)) return -1;
 
-  int code = http.GET();
-  ph_last_http_code = code;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      Serial.printf("[PiHole] begin() failed, retry %d...\n", attempt);
+      delay(attempt * 800);  // 800ms, then 1600ms
+    }
 
-  if (code == 401) {
-    http.end();
-    ph_sid[0]    = '\0';
-    ph_auth_done = false;
-    if (!phAuthenticate()) return 401;
-    phBuildUrl(url, sizeof(url), path);
-    if (!http.begin(client, url)) return -1;
-    code = http.GET();
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(8000);
+
+    if (!http.begin(client, url)) continue;  // try again with fresh socket
+
+    int code = http.GET();
     ph_last_http_code = code;
+
+    if (code == 401) {
+      http.end();
+      ph_sid[0]    = '\0';
+      ph_auth_done = false;
+      if (!phAuthenticate()) return 401;
+      phBuildUrl(url, sizeof(url), path);
+      WiFiClient client2;
+      HTTPClient http2;
+      http2.setTimeout(8000);
+      if (!http2.begin(client2, url)) continue;
+      code = http2.GET();
+      ph_last_http_code = code;
+      if (code == HTTP_CODE_OK) out = http2.getString();
+      http2.end();
+      return code;
+    }
+
+    if (code == HTTP_CODE_OK) out = http.getString();
+    http.end();
+    return code;
   }
 
-  if (code == HTTP_CODE_OK) out = http.getString();
-  http.end();
-  return code;
+  return -1;  // both attempts failed
 }
 
 // ---------------------------------------------------------------------------

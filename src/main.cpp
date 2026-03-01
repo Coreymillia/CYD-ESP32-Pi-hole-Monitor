@@ -27,6 +27,22 @@ Arduino_GFX *gfx = new Arduino_ILI9341(bus, GFX_NOT_DEFINED /* RST */, 1 /* rota
  * End of display setup
  ******************************************************************************/
 
+#include <XPT2046_Touchscreen.h>
+
+// ---------------------------------------------------------------------------
+// Touch — XPT2046 on VSPI (same wiring as all CYD variants)
+// ---------------------------------------------------------------------------
+#define XPT2046_IRQ   36
+#define XPT2046_MOSI  32
+#define XPT2046_MISO  39
+#define XPT2046_CLK   25
+#define XPT2046_CS    33
+#define TOUCH_DEBOUNCE 400
+
+SPIClass touchSPI(VSPI);
+XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
+static unsigned long lastTouchTime = 0;
+
 #include "Portal.h"
 #include "PiHole.h"
 
@@ -460,6 +476,11 @@ void setup() {
   // Boot button is GPIO 0 (active LOW)
   pinMode(0, INPUT_PULLUP);
 
+  // Touch controller
+  touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
+  ts.begin(touchSPI);
+  ts.setRotation(1);
+
   // Load saved WiFi settings from flash
   phLoadSettings();
 
@@ -522,6 +543,23 @@ void loop() {
   if (lastRefresh == 0 || (millis() - lastRefresh) >= REFRESH_INTERVAL) {
     refreshDisplay();
     lastRefresh = millis();
+  }
+
+  // Touch: left half = previous mode, right half = next mode
+  if (ts.tirqTouched() && ts.touched()) {
+    unsigned long now = millis();
+    if (now - lastTouchTime > TOUCH_DEBOUNCE) {
+      lastTouchTime = now;
+      TS_Point p = ts.getPoint();
+      int tx = map(p.x, 200, 3900, 0, gfx->width());
+      tx = constrain(tx, 0, gfx->width() - 1);
+      if (tx < gfx->width() / 2)
+        currentMode = (currentMode + NUM_MODES - 1) % NUM_MODES;  // left → prev
+      else
+        currentMode = (currentMode + 1) % NUM_MODES;              // right → next
+      refreshDisplay();
+      lastRefresh = millis();
+    }
   }
 
   // Countdown bar: 1px at y=239, drains left→right over REFRESH_INTERVAL

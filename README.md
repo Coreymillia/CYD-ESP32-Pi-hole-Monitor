@@ -50,7 +50,7 @@ A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Displ
 1. Clone this repository and open it in VSCode with the PlatformIO extension
 2. Connect your CYD board via USB
 3. Click **Upload** in PlatformIO (or run `pio run --target upload`)
-
+4. IF YOUR BOARD DISPLAY FLASHES WHITE THEN USE THE INVERTED FOLDER!
 ### 2. Configure WiFi and Pi-hole (first boot)
 
 On first boot the CYD will open a setup access point:

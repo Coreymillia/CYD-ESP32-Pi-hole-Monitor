@@ -61,6 +61,7 @@ On first boot the CYD will open a setup access point:
    - **WiFi Network Name (SSID)** — your 2.4 GHz WiFi name
    - **WiFi Password** — leave blank for open networks
    - **Pi-hole IP / Hostname** — just the IP, e.g. `192.168.0.103` *(no `http://`, no `/admin/`)*
+   - **Pi-hole PORT** eg :8080
    - **Pi-hole Password** — leave blank if your Pi-hole has no password set
 4. Tap **Save & Connect**
 

@@ -13,6 +13,10 @@
  ******************************************************************************/
 #include <Arduino_GFX_Library.h>
 
+#define DEVICE_NAME      "CYDPiHole"
+#define FIRMWARE_VERSION "1.0.0"
+#include "CYDIdentity.h"
+
 #define GFX_BL 21  // CYD backlight pin
 
 Arduino_DataBus *bus = new Arduino_HWSPI(
@@ -82,8 +86,8 @@ static const char *modeTitle[] = {
 #define ROWS_Y         28   // first data row top
 #define ROW_H          21   // height per query row
 
-#define COLOR_ALLOWED  0x07E0   // green
-#define COLOR_BLOCKED  0xF800   // red
+#define COLOR_ALLOWED  0x67E0   // bright lime green
+#define COLOR_BLOCKED  0xFD20   // orange
 #define COLOR_UNKNOWN  0x8410   // grey
 #define COLOR_HEADER   0x001F   // dark blue background for header
 #define COLOR_TEXT     RGB565_WHITE
@@ -175,6 +179,8 @@ void drawQueries() {
   // Domain column width in chars: (320 - COL_DOMAIN_X) / 6px = ~43 chars
   const int domainChars = (gfx->width() - COL_DOMAIN_X) / 6;
 
+  static const uint16_t allowedColors[] = { 0x07FF, 0xFFE0, 0x535F };  // cyan, yellow, blue
+
   for (int i = 0; i < MAX_QUERIES; i++) {
     int y = ROWS_Y + i * ROW_H;
 
@@ -184,9 +190,10 @@ void drawQueries() {
 
     PiQuery &q = ph_queries[i];
 
+    uint16_t rowColor = q.allowed ? allowedColors[i % 3] : COLOR_BLOCKED;
+
     // Status
-    uint16_t statusColor = q.allowed ? COLOR_ALLOWED : COLOR_BLOCKED;
-    gfx->setTextColor(statusColor);
+    gfx->setTextColor(rowColor);
     gfx->setTextSize(1);
     gfx->setCursor(COL_STATUS_X, y + 7);
     gfx->print(q.allowed ? "OK " : "BLK");
@@ -196,14 +203,14 @@ void drawQueries() {
     phLastOctet(q.client, octet, sizeof(octet));
     char clientBuf[6];
     snprintf(clientBuf, sizeof(clientBuf), ".%s", octet);
-    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextColor(0xC47F);  // lavender
     gfx->setCursor(COL_CLIENT_X, y + 7);
     gfx->print(clientBuf);
 
     // Domain
     char domBuf[48];
     truncate(q.domain, domBuf, domainChars);
-    gfx->setTextColor(COLOR_TEXT);
+    gfx->setTextColor(rowColor);
     gfx->setCursor(COL_DOMAIN_X, y + 7);
     gfx->print(domBuf);
   }
@@ -295,7 +302,7 @@ void drawTopBlocked() {
     // Domain
     char domBuf[48];
     truncate(e.domain, domBuf, domainChars);
-    gfx->setTextColor(COLOR_TEXT);
+    gfx->setTextColor(COLOR_BLOCKED);  // orange — all entries here are blocked
     gfx->setCursor(56, y + 7);
     gfx->print(domBuf);
   }
@@ -330,7 +337,7 @@ void drawTopClients() {
 
     char nameBuf[52];
     truncate(e.name, nameBuf, nameChars);
-    gfx->setTextColor(COLOR_TEXT);
+    gfx->setTextColor(0x07FF);  // cyan
     gfx->setCursor(56, y + 7);
     gfx->print(nameBuf);
   }
@@ -527,6 +534,7 @@ void setup() {
 
   showStatus("WiFi connected!");
   delay(400);
+  identityBegin();
 
   drawChrome();
   refreshDisplay();
@@ -539,6 +547,7 @@ void setup() {
 unsigned long lastRefresh = 0;
 
 void loop() {
+  identityHandle();
   checkButton();
   if (lastRefresh == 0 || (millis() - lastRefresh) >= REFRESH_INTERVAL) {
     refreshDisplay();

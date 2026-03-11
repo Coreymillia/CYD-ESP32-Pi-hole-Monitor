@@ -74,7 +74,7 @@ static bool phAuthenticate() {
   http.setTimeout(8000);
 
   char authUrl[80];
-  snprintf(authUrl, sizeof(authUrl), "http://%s/api/auth", ph_pihole_host);
+  snprintf(authUrl, sizeof(authUrl), "http://%s:%u/api/auth", ph_pihole_host, ph_pihole_port);
 
   if (!http.begin(client, authUrl)) {
     snprintf(ph_last_error, sizeof(ph_last_error), "auth begin() failed");
@@ -123,9 +123,9 @@ static bool phAuthenticate() {
 static void phBuildUrl(char *url, size_t urlLen, const char *path) {
   if (ph_sid[0] != '\0') {
     const char *sep = strchr(path, '?') ? "&" : "?";
-    snprintf(url, urlLen, "http://%s%s%ssid=%s", ph_pihole_host, path, sep, ph_sid);
+    snprintf(url, urlLen, "http://%s:%u%s%ssid=%s", ph_pihole_host, ph_pihole_port, path, sep, ph_sid);
   } else {
-    snprintf(url, urlLen, "http://%s%s", ph_pihole_host, path);
+    snprintf(url, urlLen, "http://%s:%u%s", ph_pihole_host, ph_pihole_port, path);
   }
 }
 

@@ -16,7 +16,7 @@ A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Displ
 - **Mode 5 — 24h Activity Graph:** stacked bar chart of DNS traffic over the last 24 hours (green = allowed, red = blocked)
 - **Countdown bar** — 1px progress bar at the bottom edge shows time until next refresh
 - **Stale data preserved on error** — brief network hiccups show an error in the header only; last good data stays visible
-- Color-coded results: 🟢 **OK** (allowed) and 🔴 **BLK** (blocked)
+- Color-coded results: **OK** rows cycle through cyan → yellow → blue; **BLK** rows are orange
 - First-boot **captive portal** for WiFi and Pi-hole setup — no code editing required
 - **Hold BOOT 3 seconds** at any time to re-enter setup
 - Supports both **passwordless** and **password-protected** Pi-hole v6 installs
@@ -50,7 +50,7 @@ A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Displ
 1. Clone this repository and open it in VSCode with the PlatformIO extension
 2. Connect your CYD board via USB
 3. Click **Upload** in PlatformIO (or run `pio run --target upload`)
-4. IF YOUR BOARD DISPLAY FLASHES WHITE THEN USE THE INVERTED FOLDER!
+
 ### 2. Configure WiFi and Pi-hole (first boot)
 
 On first boot the CYD will open a setup access point:
@@ -104,7 +104,7 @@ Live Feed  ←→  Stats  ←→  Top Blocked  ←→  Top Clients  ←→  24h 
 
 | Column | Description |
 |--------|-------------|
-| **ST** | `OK ` (green) = allowed &nbsp;/&nbsp; `BLK` (red) = blocked |
+| **ST** | `OK ` (cyan/yellow/blue, cycling) = allowed &nbsp;/&nbsp; `BLK` (orange) = blocked |
 | **.CLT** | Last octet of the client IP (e.g. `.5` = `192.168.0.5`) |
 | **DOMAIN** | Queried domain, truncated with `..` if too long |
 
@@ -149,8 +149,8 @@ Shows the 10 most active devices on your network by total DNS query count. Displ
 ### Mode 5 — 24h Activity Graph
 
 A stacked bar chart of all DNS traffic over the last 24 hours in 10-minute buckets.
-- 🟢 Green = allowed queries
-- 🔴 Red = blocked queries
+- 🟢 Lime = allowed queries
+- 🟠 Orange = blocked queries
 - Left edge = 24 hours ago, right edge = now
 
 ---
@@ -196,6 +196,28 @@ All managed automatically by PlatformIO:
 | `ERR: begin() failed` | Brief network hiccup (common during heavy streaming) | Clears automatically on next poll — last data stays on screen |
 | `Fetch failed: No Pi-hole host set` | Setup was skipped | Hold BOOT 3s to complete setup |
 | `WiFi failed: "YourSSID"` | Wrong WiFi credentials or out of range | Hold BOOT 3s to re-enter setup |
+
+---
+
+## CYDPiAlert Integration
+
+This firmware includes [`CYDIdentity.h`](include/CYDIdentity.h) and serves a `GET /identify` endpoint on port 80. Any device running this firmware will be automatically discovered by **[CYDPiAlert-ESPID](https://github.com/coreymillia/CYDPiAlert-ESPID)'s Mode 9 — ESP Devices**, which scans your network for microcontrollers and displays their name, firmware version, RSSI, uptime, and IP.
+
+The identity response looks like:
+
+```json
+{
+  "name": "CYDPiHole",
+  "mac": "xx:xx:xx:xx:xx:xx",
+  "version": "1.0.0",
+  "uptime_s": 3600,
+  "rssi": -45,
+  "last_fetch": 0,
+  "errors": 0
+}
+```
+
+No configuration needed — it activates automatically once the device is connected to WiFi. The `INVERTEDPihole` variant identifies itself as `"INVERTEDPihole"`.
 
 ---
 

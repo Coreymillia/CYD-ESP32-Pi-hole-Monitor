@@ -13,8 +13,9 @@ extern Arduino_GFX *gfx;
 // ---------------------------------------------------------------------------
 static char ph_wifi_ssid[64]    = "";
 static char ph_wifi_pass[64]    = "";
-static char ph_pihole_host[64]  = "";  // Pi-hole IP or hostname
-static char ph_pihole_pass[64]  = "";  // Pi-hole admin password (empty = passwordless)
+static char ph_pihole_host[64]  = "";    // Pi-hole IP or hostname
+static uint16_t ph_pihole_port  = 80;   // Pi-hole web UI port (default 80, use 8080 if Pi-Alert shares the Pi)
+static char ph_pihole_pass[64]  = "";   // Pi-hole admin password (empty = passwordless)
 static bool ph_has_settings     = false;  // true if SSID + Pi-hole host are saved
 static bool ph_force_portal     = false;  // set by long-press to force setup on next boot
 
@@ -35,6 +36,7 @@ static void phLoadSettings() {
   String pass   = prefs.getString("pass",   "");
   String pihost = prefs.getString("pihost", "");
   String pipass = prefs.getString("pipass", "");
+  uint16_t piport = (uint16_t)prefs.getUInt("piport", 80);
   bool   force  = prefs.getBool("forceportal", false);
   prefs.end();
 
@@ -50,24 +52,27 @@ static void phLoadSettings() {
   pass.toCharArray(ph_wifi_pass,    sizeof(ph_wifi_pass));
   pihost.toCharArray(ph_pihole_host, sizeof(ph_pihole_host));
   pipass.toCharArray(ph_pihole_pass, sizeof(ph_pihole_pass));
+  ph_pihole_port  = piport;
   ph_has_settings = (ssid.length() > 0 && pihost.length() > 0);
   ph_force_portal = force;
 }
 
 static void phSaveSettings(const char *ssid, const char *pass,
-                           const char *pihost, const char *pipass) {
+                           const char *pihost, const char *pipass, uint16_t piport) {
   Preferences prefs;
   prefs.begin("cydpihole", false);
   prefs.putString("ssid",   ssid);
   prefs.putString("pass",   pass);
   prefs.putString("pihost", pihost);
   prefs.putString("pipass", pipass);
+  prefs.putUInt("piport",   piport);
   prefs.end();
 
   strncpy(ph_wifi_ssid,   ssid,   sizeof(ph_wifi_ssid)   - 1);
   strncpy(ph_wifi_pass,   pass,   sizeof(ph_wifi_pass)   - 1);
   strncpy(ph_pihole_host, pihost, sizeof(ph_pihole_host) - 1);
   strncpy(ph_pihole_pass, pipass, sizeof(ph_pihole_pass) - 1);
+  ph_pihole_port  = piport;
   ph_has_settings = true;
 }
 
@@ -160,7 +165,11 @@ static void phHandleRoot() {
     "<label>Pi-hole IP / Hostname:</label>"
     "<input type='text' name='pihost' value='";
   html += String(ph_pihole_host);
-  html += "' placeholder='e.g. 192.168.0.103' maxlength='63' required>"
+  html += "' placeholder='e.g. 192.168.0.105' maxlength='63' required>"
+    "<label>Pi-hole Port:</label>"
+    "<input type='number' name='piport' value='";
+  html += String(ph_pihole_port);
+  html += "' placeholder='80' min='1' max='65535' required>"
     "<label>Pi-hole Password"
     " <span style='color:#445566;font-weight:normal'>(leave blank if none)</span>:</label>"
     "<input type='password' name='pipass' value='";
@@ -185,6 +194,8 @@ static void phHandleSave() {
   String pass   = portalServer->hasArg("pass")   ? portalServer->arg("pass")   : "";
   String pihost = portalServer->hasArg("pihost") ? portalServer->arg("pihost") : "";
   String pipass = portalServer->hasArg("pipass") ? portalServer->arg("pipass") : "";
+  uint16_t piport = portalServer->hasArg("piport") ? (uint16_t)portalServer->arg("piport").toInt() : 80;
+  if (piport == 0) piport = 80;
 
   if (ssid.length() == 0) {
     portalServer->send(400, "text/html",
@@ -204,7 +215,7 @@ static void phHandleSave() {
     return;
   }
 
-  phSaveSettings(ssid.c_str(), pass.c_str(), pihost.c_str(), pipass.c_str());
+  phSaveSettings(ssid.c_str(), pass.c_str(), pihost.c_str(), pipass.c_str(), piport);
 
   portalServer->send(200, "text/html",
     "<html><head><meta charset='UTF-8'>"

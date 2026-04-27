@@ -1,6 +1,8 @@
 # CYDPiHole — Pi-hole Monitor for the Cheap Yellow Display
 
-A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Display)**. Displays live DNS queries, today's stats, top blocked domains, top clients, and a 24-hour activity graph — all from your local Pi-hole v6 instance, updating every 5 seconds.
+A real-time Pi-hole DNS dashboard and watcher running on the **ESP32 CYD (Cheap Yellow Display)**. Displays live DNS queries, today's stats, top blocked domains, top clients, a 24-hour activity graph, watched hits, watched target summaries, and a lightweight DNS sniffer view — all from your local Pi-hole v6 instance.
+
+This version can also be **tuned to watch for specific DNS queries**. You can choose the domains you care about, optionally limit them to selected devices, import one extra blocklist, and quickly see whether Pi-hole **blocked** those lookups or whether they **slipped through**.
 
 ![CYDPiHole - Live Feed](IMG_20260222_134532.jpg)
 
@@ -8,18 +10,37 @@ A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Displ
 
 ## Features
 
-- **5 display modes** — swipe left/right on the touchscreen to cycle between modes
+- **9 display modes** — swipe left/right on the touchscreen to cycle between modes
 - **Mode 1 — Live Feed:** last 10 DNS queries with allowed/blocked status, client IP, and domain
 - **Mode 2 — Stats Dashboard:** queries today, blocked today, % blocked, blocklist size, active clients
 - **Mode 3 — Top Blocked:** the 10 most-blocked domains today with hit counts
 - **Mode 4 — Top Clients:** the 10 most active devices on your network by query count
 - **Mode 5 — 24h Activity Graph:** stacked bar chart of DNS traffic over the last 24 hours (green = allowed, red = blocked)
+- **Mode 6 — Watched Hits:** only watched-domain hits for watched devices, color-coded by blocked vs slipped-through
+- **Mode 7 — Target Devices:** per-device watched hit summary with slipped/blocked counts and DoH-provider hit counts
+- **Mode 8 — DNS Sniffer:** compact alert list for repeated allowed watched hits and DoH-provider activity
+- **Mode 9 — Seen Devices:** on-device picker for recently discovered Pi-hole devices with touch confirm add/remove
 - **Countdown bar** — 1px progress bar at the bottom edge shows time until next refresh
 - **Stale data preserved on error** — brief network hiccups show an error in the header only; last good data stays visible
 - Color-coded results: **OK** rows cycle through cyan → yellow → blue; **BLK** rows are orange
-- First-boot **captive portal** for WiFi and Pi-hole setup — no code editing required
+- Watched-mode colors: **blue = blocked / protected**, **red = allowed / slipped through**
+- First-boot **captive portal** for WiFi, Pi-hole, watched devices, watched domains, and one optional blocklist URL — no code editing required
 - **Hold BOOT 3 seconds** at any time to re-enter setup
 - Supports both **passwordless** and **password-protected** Pi-hole v6 installs
+
+---
+
+## Why use the watcher modes?
+
+The dashboard modes are useful for general Pi-hole visibility, but the watcher features are aimed at **targeted monitoring**:
+
+- watch for domains you care about such as streaming, social, gaming, or DoH-related services
+- narrow the watch down to specific phones, tablets, or other clients by **IP**, **client name**, or **MAC**
+- see whether those queries were **protected** by Pi-hole or **allowed** through
+- surface repeated allowed hits in the sniffer view so suspicious or unwanted DNS behavior stands out faster
+- build the watched-device list from **recently seen devices** instead of typing everything manually
+
+This makes the CYD better suited for keeping an eye on the DNS activity you actually care about, instead of only acting as a general Pi-hole stats screen.
 
 ---
 
@@ -51,21 +72,28 @@ A real-time Pi-hole DNS dashboard running on the **ESP32 CYD (Cheap Yellow Displ
 2. Connect your CYD board via USB
 3. Click **Upload** in PlatformIO (or run `pio run --target upload`)
 
-### 2. Configure WiFi and Pi-hole (first boot)
+### 2. Configure WiFi, Pi-hole, and watch lists (first boot)
 
 On first boot the CYD will open a setup access point:
 
 1. On your phone or PC, connect to the WiFi network: **`CYDPiHole_Setup`** (no password)
 2. Open a browser and go to **`192.168.4.1`**
-3. Fill in the form:
-   - **WiFi Network Name (SSID)** — your 2.4 GHz WiFi name
-   - **WiFi Password** — leave blank for open networks
-   - **Pi-hole IP / Hostname** — just the IP, e.g. `192.168.0.103` *(no `http://`, no `/admin/`)*
-   - **Pi-hole PORT** eg :8080
-   - **Pi-hole Password** — leave blank if your Pi-hole has no password set
+3. Fill in the main settings form:
+    - **WiFi Network Name (SSID)** — your 2.4 GHz WiFi name
+    - **WiFi Password** — leave blank for open networks
+    - **Pi-hole IP / Hostname** — just the IP, e.g. `192.168.0.103` *(no `http://`, no `/admin/`)*
+    - **Pi-hole Password** — leave blank if your Pi-hole has no password set
+    - **Watched Devices** — one device per line in the format `IP | Client Name | MAC | Label`
 4. Tap **Save & Connect**
+5. Use the separate **Domains and Blocklist** section any time you want to change:
+    - **Watched Domains** — one domain per line, e.g. `youtube.com`
+    - **Blocklist URL** — one `http://` or `https://` list at a time
+    - **Allowed-Hit Warning Threshold** — how many allowed watched hits should escalate the sniffer view
+6. Tap **Save Domains / Blocklist** when you only want to update domain watching without re-saving WiFi details
 
 The display will connect to your WiFi and start showing queries within a few seconds.
+
+After the CYD has connected to Pi-hole at least once, the setup portal will also show a **Recently Seen Devices** section populated from Pi-hole's `network/devices` data so you can add real devices directly into the watched list.
 
 > ⚠️ The ESP32 supports **2.4 GHz WiFi only**.
 
@@ -82,6 +110,7 @@ You can also press the **BOOT button** briefly to advance to the next mode.
 
 ```
 Live Feed  ←→  Stats  ←→  Top Blocked  ←→  Top Clients  ←→  24h Activity
+   ←→  Watched Hits  ←→  Target Devices  ←→  DNS Sniffer  ←→  Seen Devices
 ```
 
 ### 4. Re-entering setup
@@ -154,6 +183,39 @@ A stacked bar chart of all DNS traffic over the last 24 hours in 10-minute bucke
 - 🟠 Orange = blocked queries
 - Left edge = 24 hours ago, right edge = now
 
+### Mode 6 — Watched Hits
+
+Shows only watched-domain hits. These are filtered by your manual watched domains, the optional imported blocklist, and, when configured, your watched devices.
+
+- 🔵 **BLK** = Pi-hole blocked the watched request
+- 🔴 **SLP** = the watched request was allowed / slipped through
+
+### Mode 7 — Target Devices
+
+Summarizes each watched device with:
+
+- **S/B** = slipped-through count / blocked count for watched domains
+- **DOH** = unblocked DoH-provider hit count
+- watched devices can now match by **IP**, **client name**, or **MAC** when Pi-hole provides it
+
+### Mode 8 — DNS Sniffer
+
+Shows compact alerts derived from Pi-hole data only:
+
+- repeated allowed watched-domain hits above your configured threshold
+- DoH-provider hits from watched devices
+- protected-only summaries when watched hits were blocked cleanly
+
+### Mode 9 — Seen Devices
+
+Lists recently discovered devices from Pi-hole's `network/devices` cache directly on the CYD.
+
+- top-left and top-right header corners still switch to the previous/next mode
+- tap a row to choose a device
+- use the footer left/right areas to move between pages when more devices exist than fit on one screen
+- tap the footer to **confirm add** or **confirm remove**
+- uses the same watch-device format stored in Preferences, so the AP and on-device picker stay in sync
+
 ---
 
 ## Hardware Pinout (CYD)
@@ -183,7 +245,7 @@ All managed automatically by PlatformIO:
 - [`bblanchon/ArduinoJson @ ^7`](https://arduinojson.org/) — Pi-hole API JSON parsing
 - [`PaulStoffregen/XPT2046_Touchscreen`](https://github.com/PaulStoffregen/XPT2046_Touchscreen) — touchscreen driver
 - `WebServer`, `DNSServer`, `Preferences` — built into the ESP32 Arduino core (captive portal + NVS storage)
-- `HTTPClient`, `WiFiClient` — built into the ESP32 Arduino core (HTTP requests)
+- `HTTPClient`, `WiFiClient`, `WiFiClientSecure` — built into the ESP32 Arduino core (HTTP/HTTPS requests)
 
 ---
 
@@ -225,4 +287,3 @@ No configuration needed — it activates automatically once the device is connec
 ## License
 
 MIT
-

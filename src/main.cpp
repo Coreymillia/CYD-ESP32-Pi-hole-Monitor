@@ -58,17 +58,29 @@ static unsigned long lastTouchTime = 0;
 #define MODE_TOP_BLOCKED 2
 #define MODE_TOP_CLIENTS 3
 #define MODE_ACTIVITY    4
-#define NUM_MODES        5
+#define MODE_WATCH_HITS  5
+#define MODE_TARGETS     6
+#define MODE_SNIFFER     7
+#define MODE_SEEN_DEVICES 8
+#define NUM_MODES         9
 
 static int  currentMode          = MODE_LIVE_FEED;
 static bool modeHasData[NUM_MODES] = {false};
+static int  seenSelectedIndex    = 0;
+static int  seenPendingIndex     = -1;
+static bool seenPendingAdd       = true;
+static int  seenPageIndex        = 0;
 
 static const char *modeTitle[] = {
   "Pi-Hole Monitor",
   "Pi-Hole Stats",
   "Top Blocked",
   "Top Clients",
-  "24h Activity"
+  "24h Activity",
+  "Watched Hits",
+  "Target Devices",
+  "DNS Sniffer",
+  "Seen Devices"
 };
 
 // ---------------------------------------------------------------------------
@@ -92,10 +104,14 @@ static const char *modeTitle[] = {
 #define COLOR_HEADER   0x001F   // dark blue background for header
 #define COLOR_TEXT     RGB565_WHITE
 #define COLOR_DIM      0x8410   // grey for column labels
+#define COLOR_WATCH_SAFE    0x039F   // blue
+#define COLOR_WATCH_SLIPPED 0xF800   // red
 
 // ---------------------------------------------------------------------------
 // Status display
 // ---------------------------------------------------------------------------
+void refreshDisplay();
+
 void showStatus(const char *msg) {
   gfx->fillRect(0, 0, gfx->width(), HEADER_H, COLOR_HEADER);
   gfx->setTextColor(RGB565_WHITE);
@@ -132,6 +148,19 @@ void drawChrome() {
     gfx->setCursor(16, COLHDR_Y + 1); gfx->print("COUNT");
     gfx->setCursor(56, COLHDR_Y + 1);
     gfx->print(currentMode == MODE_TOP_CLIENTS ? "CLIENT" : "DOMAIN");
+  } else if (currentMode == MODE_WATCH_HITS) {
+    gfx->setCursor(2, COLHDR_Y + 1);  gfx->print("ST");
+    gfx->setCursor(26, COLHDR_Y + 1); gfx->print("DEV");
+    gfx->setCursor(98, COLHDR_Y + 1); gfx->print("DOMAIN");
+  } else if (currentMode == MODE_TARGETS) {
+    gfx->setCursor(2, COLHDR_Y + 1);   gfx->print("DEVICE");
+    gfx->setCursor(170, COLHDR_Y + 1); gfx->print("S/B");
+    gfx->setCursor(230, COLHDR_Y + 1); gfx->print("DOH");
+  } else if (currentMode == MODE_SNIFFER) {
+    gfx->setCursor(2, COLHDR_Y + 1); gfx->print("ALERTS");
+  } else if (currentMode == MODE_SEEN_DEVICES) {
+    gfx->setCursor(2, COLHDR_Y + 1);   gfx->print("SEEN");
+    gfx->setCursor(150, COLHDR_Y + 1); gfx->print("IP / MAC");
   }
   // MODE_STATS, MODE_ACTIVITY: no column headers
 
@@ -390,6 +419,335 @@ void drawActivityGraph() {
 }
 
 // ---------------------------------------------------------------------------
+// Render watched hits (Mode 5)
+// ---------------------------------------------------------------------------
+void drawWatchedHits() {
+  const int labelChars = 11;
+  const int domainChars = 36;
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+
+  if (ph_watch_domain_count == 0) {
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 7);
+    gfx->print("Add watched domains in the AP portal.");
+    gfx->setCursor(4, ROWS_Y + 20);
+    gfx->print("Hold BOOT 3s to re-enter setup.");
+    return;
+  }
+
+  if (ph_watch_hit_count == 0) {
+    gfx->setTextColor(COLOR_WATCH_SAFE);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 7);
+    gfx->print("No recent watched-domain hits.");
+    return;
+  }
+
+  for (int i = 0; i < PH_MAX_WATCH_HITS; i++) {
+    int y = ROWS_Y + i * ROW_H;
+    gfx->fillRect(0, y, gfx->width(), ROW_H, RGB565_BLACK);
+    if (i >= ph_watch_hit_count || !ph_watch_hits[i].valid) continue;
+
+    PhWatchHit &hit = ph_watch_hits[i];
+    uint16_t rowColor = hit.blocked ? COLOR_WATCH_SAFE : COLOR_WATCH_SLIPPED;
+
+    gfx->setTextColor(rowColor);
+    gfx->setTextSize(1);
+    gfx->setCursor(2, y + 7);
+    gfx->print(hit.blocked ? "BLK" : "SLP");
+
+    char labelBuf[16];
+    truncate(hit.label, labelBuf, labelChars);
+    gfx->setCursor(26, y + 7);
+    gfx->print(labelBuf);
+
+    char domainBuf[40];
+    truncate(hit.domain, domainBuf, domainChars);
+    gfx->setCursor(98, y + 7);
+    gfx->print(domainBuf);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render watched target summaries (Mode 6)
+// ---------------------------------------------------------------------------
+void drawTargetDevices() {
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+
+  if (ph_watched_device_count == 0) {
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 7);
+    gfx->print("Add watched devices in the AP portal.");
+    gfx->setCursor(4, ROWS_Y + 20);
+    gfx->print("Format: IP | Client | MAC | Label");
+    return;
+  }
+
+  for (int i = 0; i < ph_watch_summary_count && i < PH_MAX_WATCH_DEVICES; i++) {
+    int y = ROWS_Y + i * 16;
+    if (y > gfx->height() - 18) break;
+
+    PhWatchDeviceSummary &summary = ph_watch_summaries[i];
+    char labelBuf[20];
+    truncate(summary.label, labelBuf, 18);
+
+    gfx->setTextSize(1);
+    gfx->setTextColor(summary.slipped_hits > 0 ? COLOR_WATCH_SLIPPED :
+                      summary.blocked_hits > 0 ? COLOR_WATCH_SAFE : COLOR_TEXT);
+    gfx->setCursor(2, y);
+    gfx->print(labelBuf);
+
+    char countsBuf[12];
+    snprintf(countsBuf, sizeof(countsBuf), "%d/%d", summary.slipped_hits, summary.blocked_hits);
+    gfx->setTextColor(summary.slipped_hits > 0 ? COLOR_WATCH_SLIPPED : COLOR_WATCH_SAFE);
+    gfx->setCursor(182, y);
+    gfx->print(countsBuf);
+
+    char dohBuf[4];
+    snprintf(dohBuf, sizeof(dohBuf), "%d", summary.doh_hits);
+    gfx->setTextColor(summary.doh_hits > 0 ? COLOR_WATCH_SLIPPED : COLOR_DIM);
+    gfx->setCursor(246, y);
+    gfx->print(dohBuf);
+
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setCursor(2, y + 8);
+    if (summary.ip[0] != '\0') gfx->print(summary.ip);
+    else if (summary.client_name[0] != '\0') gfx->print(summary.client_name);
+    else gfx->print("No match key");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render sniffer alerts (Mode 7)
+// ---------------------------------------------------------------------------
+void drawSniffer() {
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+
+  if (ph_watched_device_count == 0) {
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 7);
+    gfx->print("Sniffer mode uses watched devices.");
+    gfx->setCursor(4, ROWS_Y + 20);
+    gfx->print("Add them in the AP portal first.");
+    return;
+  }
+
+  if (ph_sniffer_alert_count == 0) {
+    gfx->setTextColor(COLOR_WATCH_SAFE);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 7);
+    gfx->print("No sniffer alerts right now.");
+    gfx->setCursor(4, ROWS_Y + 20);
+    gfx->print("Blocked watched hits stay blue.");
+    return;
+  }
+
+  int y = ROWS_Y + 2;
+  for (int i = 0; i < ph_sniffer_alert_count && i < PH_MAX_SNIFFER_ALERTS; i++) {
+    if (y > gfx->height() - 18) break;
+    PhSnifferAlert &alert = ph_sniffer_alerts[i];
+    uint16_t col = alert.severity ? COLOR_WATCH_SLIPPED : COLOR_WATCH_SAFE;
+    gfx->setTextSize(1);
+    gfx->setTextColor(col);
+    gfx->setCursor(2, y);
+    gfx->print(alert.label);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(2, y + 9);
+    gfx->print(alert.detail);
+    y += 22;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render seen devices picker (Mode 8)
+// ---------------------------------------------------------------------------
+void drawSeenDevices() {
+  const int rowH = 18;
+  const int footerH = 34;
+  const int listBottom = gfx->height() - footerH;
+  const int visibleRows = (listBottom - ROWS_Y) / rowH;
+  const int totalPages = max(1, (ph_seen_device_count + visibleRows - 1) / visibleRows);
+  gfx->fillRect(0, ROWS_Y, gfx->width(), gfx->height() - ROWS_Y, RGB565_BLACK);
+
+  gfx->setTextSize(1);
+  gfx->setTextColor(COLOR_DIM);
+  gfx->setCursor(2, ROWS_Y - 10);
+  gfx->print("<");
+  gfx->setCursor(gfx->width() - 6, ROWS_Y - 10);
+  gfx->print(">");
+
+  if (ph_seen_device_count == 0) {
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, ROWS_Y + 8);
+    gfx->print("No seen devices cached yet.");
+    gfx->setCursor(4, ROWS_Y + 20);
+    gfx->print("Leave the CYD on WiFi a bit longer.");
+    return;
+  }
+
+  if (seenSelectedIndex >= ph_seen_device_count) seenSelectedIndex = ph_seen_device_count - 1;
+  if (seenSelectedIndex < 0) seenSelectedIndex = 0;
+  if (seenPageIndex < 0) seenPageIndex = 0;
+  if (seenPageIndex >= totalPages) seenPageIndex = totalPages - 1;
+
+  int start = seenPageIndex * visibleRows;
+
+  for (int row = 0; row < visibleRows; row++) {
+    int index = start + row;
+    int y = ROWS_Y + row * rowH;
+    gfx->fillRect(0, y, gfx->width(), rowH, RGB565_BLACK);
+    if (index >= ph_seen_device_count || !ph_seen_devices[index].valid) continue;
+
+    bool selected = (index == seenSelectedIndex);
+    bool watched = phSeenDeviceIsWatched(index);
+    if (selected) gfx->fillRect(0, y, gfx->width(), rowH, 0x1082);
+
+    PhSeenDevice &dev = ph_seen_devices[index];
+    char nameBuf[22];
+    truncate(dev.name[0] ? dev.name : (dev.ip[0] ? dev.ip : dev.mac), nameBuf, 20);
+
+    gfx->setTextSize(1);
+    gfx->setTextColor(watched ? COLOR_WATCH_SAFE : COLOR_TEXT);
+    gfx->setCursor(2, y + 2);
+    gfx->print(watched ? "[ON]" : "[ADD]");
+    gfx->setCursor(34, y + 2);
+    gfx->print(nameBuf);
+
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setCursor(34, y + 10);
+    if (dev.ip[0] != '\0') gfx->print(dev.ip);
+    else if (dev.mac[0] != '\0') gfx->print(dev.mac);
+    if (dev.mac[0] != '\0' && dev.ip[0] != '\0') {
+      gfx->setCursor(128, y + 10);
+      gfx->print(dev.mac);
+    }
+  }
+
+  int footerY = gfx->height() - footerH;
+  gfx->drawFastHLine(0, footerY, gfx->width(), COLOR_DIM);
+  if (seenPendingIndex >= 0 && seenPendingIndex < ph_seen_device_count) {
+    PhSeenDevice &dev = ph_seen_devices[seenPendingIndex];
+    char labelBuf[22];
+    truncate(dev.name[0] ? dev.name : (dev.ip[0] ? dev.ip : dev.mac), labelBuf, 20);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, footerY + 4);
+    gfx->print(seenPendingAdd ? "Add " : "Remove ");
+    gfx->print(labelBuf);
+    gfx->fillRect(0, footerY + 14, gfx->width() / 2, footerH - 14, 0x2945);
+    gfx->fillRect(gfx->width() / 2, footerY + 14, gfx->width() / 2, footerH - 14, seenPendingAdd ? COLOR_WATCH_SAFE : COLOR_WATCH_SLIPPED);
+    gfx->setTextColor(COLOR_TEXT);
+    gfx->setCursor(18, footerY + 22);
+    gfx->print("Cancel");
+    gfx->setCursor(gfx->width() / 2 + 18, footerY + 22);
+    gfx->print(seenPendingAdd ? "Confirm Add" : "Confirm Remove");
+  } else {
+    gfx->setTextColor(COLOR_DIM);
+    gfx->setTextSize(1);
+    gfx->setCursor(4, footerY + 4);
+    gfx->print("< Page");
+    char pageBuf[20];
+    snprintf(pageBuf, sizeof(pageBuf), "Page %d/%d", seenPageIndex + 1, totalPages);
+    int pageX = (gfx->width() - (int)strlen(pageBuf) * 6) / 2;
+    gfx->setCursor(pageX, footerY + 4);
+    gfx->print(pageBuf);
+    gfx->setCursor(gfx->width() - 38, footerY + 4);
+    gfx->print("Page >");
+    gfx->setCursor(4, footerY + 18);
+    gfx->print("Tap row to add/remove. Top corners change mode.");
+  }
+}
+
+static bool handleSeenDevicesTouch(int tx, int ty) {
+  const int footerH = 34;
+  const int rowH = 18;
+  const int footerY = gfx->height() - footerH;
+  const int visibleRows = (footerY - ROWS_Y) / rowH;
+  const int totalPages = max(1, (ph_seen_device_count + visibleRows - 1) / visibleRows);
+
+  if (ty < HEADER_H) {
+    if (tx < 48) {
+      seenPendingIndex = -1;
+      currentMode = (currentMode + NUM_MODES - 1) % NUM_MODES;
+      refreshDisplay();
+      return true;
+    }
+    if (tx > gfx->width() - 48) {
+      seenPendingIndex = -1;
+      currentMode = (currentMode + 1) % NUM_MODES;
+      refreshDisplay();
+      return true;
+    }
+  }
+
+  if (ph_seen_device_count == 0) return true;
+  if (seenPageIndex < 0) seenPageIndex = 0;
+  if (seenPageIndex >= totalPages) seenPageIndex = totalPages - 1;
+
+  int start = seenPageIndex * visibleRows;
+
+  if (seenPendingIndex >= 0 && ty >= footerY + 14) {
+    if (tx < gfx->width() / 2) {
+      seenPendingIndex = -1;
+      drawChrome();
+      drawSeenDevices();
+      return true;
+    }
+    bool changed = seenPendingAdd ? phAddSeenDeviceToWatched(seenPendingIndex)
+                                  : phRemoveSeenDeviceFromWatched(seenPendingIndex);
+    seenPendingIndex = -1;
+    if (changed) {
+      refreshDisplay();
+    } else {
+      drawChrome();
+      drawSeenDevices();
+    }
+    return true;
+  }
+
+  if (seenPendingIndex < 0 && ty >= footerY) {
+    if (tx < gfx->width() / 3) {
+      if (seenPageIndex > 0) {
+        seenPageIndex--;
+        drawChrome();
+        drawSeenDevices();
+      }
+      return true;
+    }
+    if (tx > (gfx->width() * 2) / 3) {
+      if (seenPageIndex + 1 < totalPages) {
+        seenPageIndex++;
+        drawChrome();
+        drawSeenDevices();
+      }
+      return true;
+    }
+    return true;
+  }
+
+  if (ty < ROWS_Y || ty >= footerY) {
+    return true;
+  }
+
+  int tappedRow = (ty - ROWS_Y) / rowH;
+  int seenIndex = start + tappedRow;
+  if (seenIndex < 0 || seenIndex >= ph_seen_device_count || !ph_seen_devices[seenIndex].valid) {
+    return true;
+  }
+
+  seenSelectedIndex = seenIndex;
+  seenPendingIndex = seenIndex;
+  seenPendingAdd = !phSeenDeviceIsWatched(seenIndex);
+  drawChrome();
+  drawSeenDevices();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Fetch + redraw for the current mode
 // On transient fetch failure: keep stale data visible, flash error in header
 // ---------------------------------------------------------------------------
@@ -406,6 +764,10 @@ void refreshDisplay() {
   if (currentMode == MODE_TOP_BLOCKED) ok = phFetchTopBlocked();
   if (currentMode == MODE_TOP_CLIENTS) ok = phFetchTopClients();
   if (currentMode == MODE_ACTIVITY)    ok = phFetchHistory();
+  if (currentMode == MODE_WATCH_HITS)  ok = phFetch();
+  if (currentMode == MODE_TARGETS)     ok = phFetch();
+  if (currentMode == MODE_SNIFFER)     ok = phFetch();
+  if (currentMode == MODE_SEEN_DEVICES) ok = true;
 
   if (ok) {
     modeHasData[currentMode] = true;
@@ -415,6 +777,10 @@ void refreshDisplay() {
     if (currentMode == MODE_TOP_BLOCKED) drawTopBlocked();
     if (currentMode == MODE_TOP_CLIENTS) drawTopClients();
     if (currentMode == MODE_ACTIVITY)    drawActivityGraph();
+    if (currentMode == MODE_WATCH_HITS)  drawWatchedHits();
+    if (currentMode == MODE_TARGETS)     drawTargetDevices();
+    if (currentMode == MODE_SNIFFER)     drawSniffer();
+    if (currentMode == MODE_SEEN_DEVICES) drawSeenDevices();
   } else if (modeHasData[currentMode]) {
     // Stale data is already on screen — just flash the error in the header
     gfx->fillRect(0, HEADER_Y, gfx->width(), HEADER_H, 0x3000);  // dark red
@@ -535,6 +901,8 @@ void setup() {
   showStatus("WiFi connected!");
   delay(400);
   identityBegin();
+  phRefreshBlocklistDomains(true);
+  phFetchNetworkDevices(true);
 
   drawChrome();
   refreshDisplay();
@@ -549,6 +917,8 @@ unsigned long lastRefresh = 0;
 void loop() {
   identityHandle();
   checkButton();
+  phRefreshBlocklistDomains(false);
+  phFetchNetworkDevices(false);
   if (lastRefresh == 0 || (millis() - lastRefresh) >= REFRESH_INTERVAL) {
     refreshDisplay();
     lastRefresh = millis();
@@ -561,12 +931,16 @@ void loop() {
       lastTouchTime = now;
       TS_Point p = ts.getPoint();
       int tx = map(p.x, 200, 3900, 0, gfx->width());
+      int ty = map(p.y, 240, 3800, 0, gfx->height());
       tx = constrain(tx, 0, gfx->width() - 1);
-      if (tx < gfx->width() / 2)
+      ty = constrain(ty, 0, gfx->height() - 1);
+      if (currentMode == MODE_SEEN_DEVICES) {
+        handleSeenDevicesTouch(tx, ty);
+      } else if (tx < gfx->width() / 2)
         currentMode = (currentMode + NUM_MODES - 1) % NUM_MODES;  // left → prev
       else
         currentMode = (currentMode + 1) % NUM_MODES;              // right → next
-      refreshDisplay();
+      if (currentMode != MODE_SEEN_DEVICES || seenPendingIndex < 0) refreshDisplay();
       lastRefresh = millis();
     }
   }
